@@ -12,6 +12,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.101.1",
     "@tailwindcss/postcss": "^4.2.2",
+    "microsoft-cognitiveservices-speech-sdk": "^1.49.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
@@ -27,6 +28,7 @@
     "globals": "^17.4.0",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.2",
-    "vite": "^8.0.1"
+    "vite": "^8.0.1",
+    "vite-plugin-pwa": "^1.2.0"
   }
 }
