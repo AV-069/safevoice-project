@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { supabase } from './supabaseClient';
 import * as SpeechSDK from 'microsoft-cognitiveservices-speech-sdk';
 
@@ -16,91 +16,103 @@ function App() {
 
   // --- SOS LOGIC (VOICE + DB LOGGING + SMS) ---
   const handleScamAlert = async (scamText) => {
-    // 1. Fetch Guardian from Supabase
+    // Prevent multiple alerts for the same sentence
+    if (status === 'danger') return;
+    
+    setStatus('danger');
+    
     const { data, error: fetchError } = await supabase
       .from('guardians')
       .select('phone, name')
       .order('created_at', { ascending: false })
       .limit(1);
 
-    if (fetchError) {
-      console.error("Error fetching guardian:", fetchError);
+    if (fetchError || !data || data.length === 0) {
+      alert("Scam detected! But no Guardian found. Please set details below.");
       return;
     }
 
-    if (data && data.length > 0) {
-      const guardian = data[0];
+    const guardian = data[0];
 
-      // 2. VOICE FEEDBACK: Talk to the senior immediately
-      speakToUser("A potential scam has been detected. I am notifying your guardian now. Please do not give out any personal information.");
+    // 1. VOICE FEEDBACK: Immediate Warning
+    speakToUser("Warning. A potential scam pattern has been detected. I am notifying your guardian now. Do not share any banking details.");
 
-      // 3. LOGGING: Save incident to 'scam_logs' table
-      const { error: logError } = await supabase
-        .from('scam_logs')
-        .insert([{
-          transcript: scamText,
-          guardian_notified: guardian.name,
-          severity: 'high'
-        }]);
-      
-      if (logError) console.error("Database log failed:", logError);
+    // 2. LOGGING: Save to Supabase
+    await supabase.from('scam_logs').insert([{
+      transcript: scamText,
+      guardian_notified: guardian.name,
+      severity: 'high'
+    }]);
 
-      // 4. TWILIO: Send the actual SMS
-      const success = await sendSmsAlert(guardian.phone, guardian.name, scamText);
-      
-      if (success) {
-        alert(`🚨 SOS ALERT SENT TO ${guardian.name.toUpperCase()}!`);
-      } else {
-        alert("❌ SMS failed to send, but the incident has been recorded in the database.");
-      }
-    } else {
-      alert("No Guardian found! Please set a guardian below first.");
+    // 3. TWILIO: SMS Alert
+    const success = await sendSmsAlert(guardian.phone, guardian.name, scamText);
+    if (success) {
+      console.log("SMS Sent successfully");
     }
   };
 
-  // --- AZURE SPEECH LOGIC ---
+  // --- AZURE SPEECH LOGIC (MULTILINGUAL + CONTINUOUS) ---
   const startListening = () => {
+    // Unlock Voice for Mobile Browsers
+    const silentUtterance = new SpeechSynthesisUtterance("");
+    window.speechSynthesis.speak(silentUtterance); 
+
     const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
       import.meta.env.VITE_AZURE_SPEECH_KEY, 
       import.meta.env.VITE_AZURE_SPEECH_REGION
     );
-    
+
+    // 1. IMPROVED ACCURACY: Switch to Indian English
+    speechConfig.speechRecognitionLanguage = "en-IN"; 
+
+    // 2. MULTILINGUAL AUTO-DETECTION: (English, Hindi, Tamil)
+    const autoDetectConfig = SpeechSDK.AutoDetectSourceLanguageConfig.fromLanguages(
+  ["en-IN", "hi-IN", "ta-IN", "te-IN", "ml-IN"] 
+  // English, Hindi, Tamil, Telugu, Malayalam
+);
+
     const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
-    const recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+    
+    // 3. INITIALIZE RECOGNIZER
+    const recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig, autoDetectConfig);
+
+    // 4. ADD DYNAMIC PHRASE LIST (Context Boosters)
+    const phraseList = SpeechSDK.PhraseListGrammar.fromRecognizer(recognizer);
+    phraseList.addPhrase("Digital Arrest");
+    phraseList.addPhrase("Verification");
+    phraseList.addPhrase("CBI Department");
+    phraseList.addPhrase("Quiet room");
 
     setIsListening(true);
-    setTranscript("Listening for safety...");
+    setTranscript("SafeVoice active. Listening to conversation...");
 
-    recognizer.recognizeOnceAsync(result => {
-      if (result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
-        const text = result.text;
+    // 5. CONTINUOUS RECOGNITION (Better for long scam stories)
+    recognizer.startContinuousRecognitionAsync();
+
+    recognizer.recognized = (s, e) => {
+      if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+        const text = e.result.text;
         setTranscript(text);
 
-        // Scam Detection Logic
-        const detection = detectScam(text);
-
-        if (detection.isScam) {
-          setStatus('danger'); 
+        // Check for scam patterns in every recognized sentence
+        if (detectScam(text)) {
           handleScamAlert(text);
-        } else {
-          setStatus('safe');
         }
-      } else {
-        setTranscript("I didn't catch that. Please try again.");
       }
+    };
+
+    recognizer.canceled = (s, e) => {
       setIsListening(false);
-      recognizer.close();
-    });
+      recognizer.stopContinuousRecognitionAsync();
+    };
   };
 
   // --- SUPABASE SAVE LOGIC ---
   const saveGuardian = async () => {
     if (!guardianName || !guardianPhone) return alert("Please fill both name and phone!");
-    
     const { error } = await supabase
       .from('guardians')
       .insert([{ name: guardianName, phone: guardianPhone }]);
-      
     if (error) {
       alert("Error saving: " + error.message);
     } else { 
