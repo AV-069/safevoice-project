@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from './supabaseClient';
 import * as SpeechSDK from 'microsoft-cognitiveservices-speech-sdk';
 
@@ -7,12 +7,11 @@ import { detectScam, speakToUser } from './utils/scamDetector';
 import { sendSmsAlert } from './services/twilioService';
 import { StatusDisplay } from './components/StatusDisplay';
 
-// --- GUIDANCE DATA FOR REAL-TIME SCRIPTING ---
 const GUIDANCE_DATA = {
   authority: {
-    en: { reply: "Ask: 'Which station are you calling from and what is your ID?'", truth: "⚠️ Real police never arrest people over a video/phone call." },
-    ta: { reply: "கேளுங்கள்: 'எந்த ஸ்டேஷனில் இருந்து பேசுகிறீர்கள்? உங்கள் அடையாள அட்டை எங்கே?'", truth: "⚠️ போலீசார் போன் மூலம் யாரையும் கைது செய்ய மாட்டார்கள்." },
-    hi: { reply: "पूछें: 'आप किस थाने से बोल रहे हैं? अपनी आईडी दिखाएं।'", truth: "⚠️ पुलिस फोन पर कभी डिजिटल अरेस्ट नहीं करती।" }
+    en: { reply: "Ask: 'Which station are you calling from and what is your ID?'", truth: "⚠️ Real police never arrest people over a video call." },
+    ta: { reply: "கேளுங்கள்: 'எந்த ஸ்டேஷனில் இருந்து பேசுகிறீர்கள்? உங்கள் ஐடி என்ன?'", truth: "⚠️ போலீசார் போன் மூலம் யாரையும் கைது செய்ய மாட்டார்கள்." },
+    hi: { reply: "पूछें: 'आप किस थाने से बोल रहे हैं? अपनी आईडी दिखाएं।'", truth: "⚠️ पुलिस फोन पर कभी गिरफ्तार नहीं करती।" }
   },
   money: {
     en: { reply: "Say: 'I will discuss this with my family first.'", truth: "🛑 NO government 'Secure Vault' exists for private transfers." },
@@ -21,83 +20,22 @@ const GUIDANCE_DATA = {
   },
   isolation: {
     en: { reply: "Say: 'I am hanging up now to call the local police.'", truth: "🔒 Scammers want you alone so they can scare you. Hang up!" },
-    ta: { reply: "சொல்லுங்கள்: 'நான் போனை வைத்துவிட்டு லோக்கல் போலீசுக்கு போன் செய்கிறேன்.'", truth: "🔒 உங்களைத் தனியாக இருக்கச் சொன்னால் அது பொய்." },
-    hi: { reply: "कहें: 'मैं फोन रखकर लोकल पुलिस को कॉल कर रहा हूँ।'", truth: "🔒 वे आपको डराना चाहते हैं, कृपया फोन काट दें।" }
+    ta: { reply: "சொல்லுங்கள்: 'நான் போனை வைத்துவிட்டு போலீசுக்கு போன் செய்கிறேன்.'", truth: "🔒 உங்களைத் தனியாக இருக்கச் சொன்னால் அது பொய்." },
+    hi: { reply: "कहें: 'मैं फोन काटकर पुलिस को कॉल कर रहा हूँ।'", truth: "🔒 वे आपको डराना चाहते हैं, कृपया फोन काट दें।" }
   }
 };
 
 function App() {
   const [status, setStatus] = useState('safe'); 
   const [isListening, setIsListening] = useState(false);
-  const [transcript, setTranscript] = useState("Click start and say something...");
+  const [transcript, setTranscript] = useState("Ready to protect...");
   const [guardianName, setGuardianName] = useState('');
   const [guardianPhone, setGuardianPhone] = useState('');
-  
-  // New UI States
-  const [advice, setAdvice] = useState({ reply: "Listening for patterns...", truth: "Stay calm." });
-  const [userLang, setUserLang] = useState('en'); // 'en', 'hi', or 'ta'
+  const [advice, setAdvice] = useState({ reply: "Monitoring...", truth: "Stay calm." });
+  const [userLang, setUserLang] = useState('en');
 
-  // --- AZURE SPEECH LOGIC ---
-  // Memoized so it can be called by useEffect safely
-  const startListening = useCallback(() => {
-    if (isListening) return;
-
-    // Unlock Voice for Mobile Browsers
-    const silentUtterance = new SpeechSynthesisUtterance("");
-    window.speechSynthesis.speak(silentUtterance); 
-
-    const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
-      import.meta.env.VITE_AZURE_SPEECH_KEY, 
-      import.meta.env.VITE_AZURE_SPEECH_REGION
-    );
-
-    speechConfig.speechRecognitionLanguage = "en-IN"; 
-
-    const autoDetectConfig = SpeechSDK.AutoDetectSourceLanguageConfig.fromLanguages(
-      ["en-IN", "hi-IN", "ta-IN", "te-IN", "ml-IN"] 
-    );
-
-    const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
-    const recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig, autoDetectConfig);
-
-    const phraseList = SpeechSDK.PhraseListGrammar.fromRecognizer(recognizer);
-    phraseList.addPhrase("Digital Arrest");
-    phraseList.addPhrase("CBI Department");
-    phraseList.addPhrase("Quiet room");
-
-    setIsListening(true);
-    setTranscript("SafeVoice active. Monitoring call...");
-    recognizer.startContinuousRecognitionAsync();
-
-    recognizer.recognized = (s, e) => {
-      if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
-        const text = e.result.text;
-        setTranscript(text);
-        if (detectScam(text)) {
-          handleScamAlert(text);
-        }
-      }
-    };
-
-    recognizer.canceled = () => {
-      setIsListening(false);
-      recognizer.stopContinuousRecognitionAsync();
-    };
-  }, [isListening, userLang]);
-
-  // --- AUTO-START & PERMISSIONS LOGIC ---
-  useEffect(() => {
-    // 1. Check for Auto-Start flag from Notification
-    const urlParams = new URLSearchParams(window.location.search);
-    if (urlParams.get('autoStart') === 'true') {
-      startListening();
-    }
-
-    // 2. Request Notification Permissions on Load
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission();
-    }
-  }, [startListening]);
+  // Use a Ref to prevent multiple recognizers from starting
+  const recognizerRef = useRef(null);
 
   // --- SOS & GUIDANCE LOGIC ---
   const handleScamAlert = async (scamText) => {
@@ -126,10 +64,65 @@ function App() {
     }
   };
 
+  // --- AZURE SPEECH LOGIC ---
+  const startListening = useCallback(() => {
+    if (isListening) return;
+
+    // 1. Setup Config
+    const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(
+      import.meta.env.VITE_AZURE_SPEECH_KEY, 
+      import.meta.env.VITE_AZURE_SPEECH_REGION
+    );
+    speechConfig.speechRecognitionLanguage = "en-IN"; 
+
+    // 2. Multilingual Support
+    const autoDetectConfig = SpeechSDK.AutoDetectSourceLanguageConfig.fromLanguages(
+      ["en-IN", "hi-IN", "ta-IN", "te-IN", "ml-IN"] 
+    );
+
+    const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+    const recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig, autoDetectConfig);
+    recognizerRef.current = recognizer;
+
+    // 3. Start
+    setIsListening(true);
+    setTranscript("SafeVoice is listening...");
+    
+    recognizer.startContinuousRecognitionAsync();
+
+    recognizer.recognized = (s, e) => {
+      if (e.result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+        const text = e.result.text;
+        setTranscript(text);
+        if (detectScam(text)) {
+          handleScamAlert(text);
+        }
+      }
+    };
+
+    recognizer.canceled = () => {
+      setIsListening(false);
+      setTranscript("Connection lost. Tap Start again.");
+    };
+  }, [isListening, userLang]);
+
+  // --- AUTO-START EFFECT ---
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    // ONLY start automatically if the URL has ?autoStart=true
+    if (urlParams.get('autoStart') === 'true' && !isListening) {
+      startListening();
+    }
+
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, [startListening]); // Removed isListening from here to prevent loops
+
   const saveGuardian = async () => {
-    if (!guardianName || !guardianPhone) return alert("Please fill both fields!");
+    if (!guardianName || !guardianPhone) return alert("Fill fields!");
     const { error } = await supabase.from('guardians').insert([{ name: guardianName, phone: guardianPhone }]);
-    if (!error) { alert("Guardian Saved!"); setGuardianName(''); setGuardianPhone(''); }
+    if (!error) { alert("Saved!"); setGuardianName(''); setGuardianPhone(''); }
   };
 
   return (
@@ -138,11 +131,7 @@ function App() {
       
       <div className="flex gap-2 mb-6">
         {['en', 'hi', 'ta'].map((lang) => (
-          <button 
-            key={lang} 
-            onClick={() => setUserLang(lang)}
-            className={`px-4 py-1 rounded-full font-bold uppercase text-xs border-2 ${userLang === lang ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-300'}`}
-          >
+          <button key={lang} onClick={() => setUserLang(lang)} className={`px-4 py-1 rounded-full font-bold uppercase text-xs border-2 ${userLang === lang ? 'bg-blue-600 text-white' : 'bg-white text-gray-600'}`}>
             {lang === 'en' ? 'English' : lang === 'hi' ? 'Hindi' : 'Tamil'}
           </button>
         ))}
@@ -153,17 +142,18 @@ function App() {
       {status === 'danger' && (
         <div className="w-full max-w-md mt-6 space-y-4">
           <div className="bg-white border-l-8 border-blue-600 p-5 rounded-2xl shadow-xl">
-            <p className="text-xs font-black text-blue-600 uppercase mb-1">Reply with this:</p>
-            <p className="text-xl font-bold text-gray-800 leading-tight">"{advice.reply}"</p>
+            <p className="text-xs font-black text-blue-600 mb-1">REPLY THIS:</p>
+            <p className="text-xl font-bold">"{advice.reply}"</p>
           </div>
           <div className="bg-yellow-400 border-l-8 border-black p-5 rounded-2xl shadow-xl">
-            <p className="text-xs font-black text-black uppercase mb-1">Reality Check:</p>
-            <p className="text-lg font-extrabold text-black leading-tight">{advice.truth}</p>
+            <p className="text-xs font-black text-black mb-1">THE TRUTH:</p>
+            <p className="text-lg font-extrabold text-black">{advice.truth}</p>
           </div>
-          <button onClick={() => { setStatus('safe'); setAdvice({reply: "Monitoring...", truth: "Stay calm."}) }} className="w-full bg-black text-white p-3 rounded-xl font-black uppercase">I HANGED UP / I AM SAFE</button>
+          <button onClick={() => { setStatus('safe'); setAdvice({reply: "Monitoring...", truth: "Stay calm."}) }} className="w-full bg-black text-white p-3 rounded-xl font-black">I AM SAFE</button>
         </div>
       )}
 
+      {/* START BUTTON - Now properly conditional */}
       <button 
         onClick={startListening}
         disabled={isListening}
@@ -173,9 +163,9 @@ function App() {
       </button>
 
       <div className="bg-white p-6 rounded-[30px] shadow-2xl w-full max-w-md border-4 border-blue-600">
-        <h2 className="text-lg font-black text-blue-900 mb-3 uppercase text-center">Guardian Settings</h2>
-        <input type="text" placeholder="Guardian Name" value={guardianName} onChange={(e) => setGuardianName(e.target.value)} className="w-full p-3 mb-2 border-2 rounded-xl" />
-        <input type="text" placeholder="Guardian Phone (+91...)" value={guardianPhone} onChange={(e) => setGuardianPhone(e.target.value)} className="w-full p-3 mb-3 border-2 rounded-xl" />
+        <h2 className="text-lg font-black text-blue-900 mb-3 text-center uppercase">Guardian Settings</h2>
+        <input type="text" placeholder="Name" value={guardianName} onChange={(e) => setGuardianName(e.target.value)} className="w-full p-3 mb-2 border-2 rounded-xl" />
+        <input type="text" placeholder="Phone (+91...)" value={guardianPhone} onChange={(e) => setGuardianPhone(e.target.value)} className="w-full p-3 mb-3 border-2 rounded-xl" />
         <button onClick={saveGuardian} className="w-full bg-emerald-600 text-white p-3 rounded-xl font-bold">SAVE DETAILS</button>
       </div>
     </div>
